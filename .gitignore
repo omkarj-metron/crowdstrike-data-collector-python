@@ -34,3 +34,8 @@ env/
 ENV/
 env.bak/
 .venv.bak/
+
+# Logs and rtr-re
+*.log
+logs/
+rtr-result/
