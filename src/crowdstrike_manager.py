@@ -33,7 +33,11 @@ class CrowdStrikeRTR:
         # --- API Endpoints ---
         self.base_url = "https://api.crowdstrike.com"
         self.auth_token_url = f"{self.base_url}/oauth2/token"
+        self.devices_query_url = f"{self.base_url}/devices/queries/devices/v1"
+        self.devices_details_url = f"{self.base_url}/devices/combined/host-group-members/v1"
+        self.devices_online_state_url = f"{self.base_url}/devices/entities/online-state/v1"
         self.rtr_session_url = f"{self.base_url}/real-time-response/entities/sessions/v1"
+        self.rtr_batch_init_session_url = f"{self.base_url}/real-time-response/combined/batch-init-session/v1"
         self.rtr_admin_command_url = f"{self.base_url}/real-time-response/entities/admin-command/v1"
 
         # --- Instance Variables for Session Management ---
@@ -41,6 +45,8 @@ class CrowdStrikeRTR:
         self.device_id = os.getenv("DEVICE_ID")
         self.session_id = None
         self.cloud_request_id = None
+        # Dictionary to store session_id per device_id for batch initialization
+        self.device_sessions = {}
 
         if not self.device_id:
             self.logger.warning("DEVICE_ID not found in .env. Please set it or provide it programmatically.")
@@ -80,9 +86,15 @@ class CrowdStrikeRTR:
         response = None
         try:
             if method.upper() == "POST":
-                response = requests.post(
-                    url, headers=headers, params=params, json=json_data, data=data
-                )
+                # Don't pass both json and data - use json if json_data provided, else data
+                if json_data:
+                    response = requests.post(
+                        url, headers=headers, params=params, json=json_data
+                    )
+                else:
+                    response = requests.post(
+                        url, headers=headers, params=params, data=data
+                    )
             elif method.upper() == "GET":
                 response = requests.get(url, headers=headers, params=params)
             # Add more methods (PUT, DELETE) if needed
@@ -131,6 +143,180 @@ class CrowdStrikeRTR:
                 self.logger.error("Failed to get access token from response.")
         return False
 
+    def get_all_devices(self):
+        """
+        Fetches all device IDs from the CrowdStrike API.
+        Returns:
+            List[str]: List of device IDs if successful, None otherwise.
+        """
+        headers = self._get_headers()
+        
+        self.logger.info("Fetching all devices...")
+        devices_response = self._make_api_call(
+            "GET", self.devices_query_url, headers=headers
+        )
+        
+        if devices_response:
+            resources = devices_response.get("resources", [])
+            if resources:
+                self.logger.info(f"Found {len(resources)} devices")
+                return resources
+            else:
+                self.logger.warning("No devices found in response")
+        else:
+            self.logger.error("Failed to get devices from API")
+        return None
+
+    def get_windows_devices(self, device_ids):
+        """
+        Gets device details and filters to only Windows devices.
+        Args:
+            device_ids (List[str]): List of device IDs to check
+        Returns:
+            List[str]: List of Windows device IDs if successful, None otherwise.
+        """
+        if not device_ids:
+            self.logger.warning("No device IDs provided to check for Windows devices")
+            return []
+        
+        headers = self._get_headers()
+        # IDs are passed as query parameters (comma-separated)
+        ids_param = ",".join(device_ids)
+        params = {"ids": ids_param}
+        
+        self.logger.info(f"Fetching device details for {len(device_ids)} devices to filter Windows...")
+        devices_response = self._make_api_call(
+            "GET", self.devices_details_url, headers=headers, params=params
+        )
+        
+        if devices_response:
+            resources = devices_response.get("resources", [])
+            windows_devices = []
+            for device_info in resources:
+                device_id = device_info.get("device_id")
+                platform_name = device_info.get("platform_name", "")
+                hostname = device_info.get("hostname", "Unknown")
+                
+                if platform_name and platform_name.lower() == "windows":
+                    windows_devices.append(device_id)
+                    self.logger.debug(f"Device {device_id} ({hostname}) is Windows")
+                else:
+                    self.logger.debug(f"Device {device_id} ({hostname}) is {platform_name}, skipping")
+            
+            self.logger.info(f"Found {len(windows_devices)} Windows devices out of {len(device_ids)} total")
+            return windows_devices
+        else:
+            self.logger.error("Failed to get device details from API")
+        return None
+
+    def get_online_devices(self, device_ids):
+        """
+        Checks which devices are online.
+        Args:
+            device_ids (List[str]): List of device IDs to check
+        Returns:
+            List[str]: List of online device IDs if successful, None otherwise.
+        """
+        if not device_ids:
+            self.logger.warning("No device IDs provided to check online status")
+            return []
+        
+        headers = self._get_headers()
+        # Even though it's GET, IDs are passed in the request body as JSON
+        payload = {"ids": device_ids}
+        # Ensure Content-Type is set for JSON body
+        headers["Content-Type"] = "application/json"
+        
+        self.logger.info(f"Checking online status for {len(device_ids)} devices...")
+        # Make direct request since GET with body is not standard and _make_api_call doesn't support it
+        # requests.get() doesn't support json parameter, so we use data with JSON string
+        try:
+            response = requests.get(
+                self.devices_online_state_url,
+                headers=headers,
+                data=json.dumps(payload)
+            )
+            response.raise_for_status()
+            online_state_response = response.json()
+        except requests.exceptions.HTTPError as http_err:
+            self.logger.error(f"HTTP error occurred: {http_err} - Status Code: {response.status_code if response else 'N/A'}")
+            if response is not None:
+                self.logger.debug(f"Response content: {response.text}")
+            return None
+        except Exception as e:
+            self.logger.error(f"Error checking online status: {e}")
+            return None
+        
+        if online_state_response:
+            resources = online_state_response.get("resources", [])
+            online_devices = []
+            for device_info in resources:
+                device_id = device_info.get("id")
+                state = device_info.get("state", "").lower()
+                if state == "online":
+                    online_devices.append(device_id)
+                    self.logger.debug(f"Device {device_id} is online")
+                else:
+                    self.logger.debug(f"Device {device_id} is {state}")
+            
+            self.logger.info(f"Found {len(online_devices)} online devices out of {len(device_ids)} total")
+            return online_devices
+        else:
+            self.logger.error("Failed to get online state from API")
+        return None
+
+    def batch_initialize_rtr_sessions(self, device_ids):
+        """
+        Initializes RTR sessions for multiple devices at once using batch API.
+        Args:
+            device_ids (List[str]): List of device IDs to initialize sessions for
+        Returns:
+            dict: Dictionary mapping device_id -> session_id if successful, None otherwise
+        """
+        if not device_ids:
+            self.logger.warning("No device IDs provided for batch session initialization")
+            return None
+
+        headers = self._get_headers()
+        payload = {
+            "host_ids": device_ids,
+            "queue_offline": False
+        }
+
+        self.logger.info(f"Initializing RTR sessions for {len(device_ids)} devices in batch...")
+        batch_response = self._make_api_call(
+            "POST",
+            self.rtr_batch_init_session_url,
+            headers=headers,
+            json_data=payload,
+        )
+
+        if batch_response:
+            self.logger.debug("Batch RTR Session Initialization Response: %s", json.dumps(batch_response))
+            resources = batch_response.get("resources", {})
+            batch_id = batch_response.get("batch_id")
+            
+            if batch_id:
+                self.logger.info(f"Batch ID: {batch_id}")
+            
+            # Extract session_id for each device
+            sessions = {}
+            for device_id, session_info in resources.items():
+                session_id = session_info.get("session_id")
+                if session_id:
+                    sessions[device_id] = session_id
+                    self.logger.info(f"Device {device_id}: Session ID {session_id}")
+                else:
+                    errors = session_info.get("errors", [])
+                    self.logger.warning(f"Failed to get session_id for device {device_id}. Errors: {errors}")
+            
+            self.device_sessions = sessions
+            self.logger.info(f"Successfully initialized {len(sessions)}/{len(device_ids)} sessions")
+            return sessions
+        else:
+            self.logger.error("Failed to initialize batch RTR sessions")
+            return None
+
     def initialize_rtr_session(self, device_id=None):
         """
         Initializes a new Real-time Response session with the cloud using _make_api_call.
@@ -171,10 +357,22 @@ class CrowdStrikeRTR:
         Runs an RTR script on a host using _make_api_call.
         """
         target_device_id = device_id if device_id else self.device_id
-        target_session_id = session_id if session_id else self.session_id
+        
+        # Try to get session_id from multiple sources:
+        # 1. Explicit session_id parameter
+        # 2. device_sessions dictionary (from batch init)
+        # 3. Instance session_id
+        if session_id:
+            target_session_id = session_id
+        elif target_device_id and target_device_id in self.device_sessions:
+            target_session_id = self.device_sessions[target_device_id]
+        else:
+            target_session_id = self.session_id
 
         if not target_device_id or not target_session_id:
             self.logger.error("Device ID or Session ID not available. Cannot run RTR script.")
+            self.logger.debug("Device ID: %s, Session ID: %s, Available sessions: %s", 
+                            target_device_id, target_session_id, list(self.device_sessions.keys()))
             return False
 
         headers = self._get_headers()

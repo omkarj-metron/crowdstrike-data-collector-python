@@ -4,7 +4,7 @@ import json
 import logging
 from typing import Dict, List, Optional, Tuple
 
-from .crowdstrike_manager import CrowdStrikeRTR, BloodhoundManager
+from src.crowdstrike_manager import CrowdStrikeRTR, BloodhoundManager
 
 
 def process_script(
@@ -15,7 +15,8 @@ def process_script(
     max_retries: int,
     retry_delay: int,
     upload_to_bh: bool,
-    logger: logging.Logger
+    logger: logging.Logger,
+    device_id: Optional[str] = None
 ) -> Tuple[bool, Optional[List[Dict]]]:
     """Process a single RTR script and optionally upload results to BloodHound.
     
@@ -24,32 +25,22 @@ def process_script(
         - success: True if script completed successfully
         - collected_results: List of result items if any were collected
     """
-    # Step 1: auth
-    logger.info("Step 1: Getting auth token")
-    if not rtr_client.get_auth_token():
-        logger.error("Failed to get authentication token. Skipping script %s.", script_name)
-        return False, None
-
-    # Step 2: initialize session
-    logger.info("Step 2: Initializing RTR session")
-    if not rtr_client.initialize_rtr_session():
-        logger.error("Failed to initialize RTR session for script %s.", script_name)
-        return False, None
-
-    # Step 3: run script
-    logger.info("Step 3: Running RTR script %s", script_name)
+    # Note: Auth token and RTR session should be initialized before calling this function
+    
+    # Step 1: run script
+    logger.info("Step 1: Running RTR script %s", script_name)
     if not rtr_client.run_rtr_script(script_name=script_name):
         logger.error("Failed to run RTR script %s.", script_name)
         return False, None
 
-    # Step 4: poll for status with retries
-    logger.info("Step 4: Polling for command status (max_retries=%d, delay=%ds)", max_retries, retry_delay)
+    # Step 2: poll for status with retries
+    logger.info("Step 2: Polling for command status (max_retries=%d, delay=%ds)", max_retries, retry_delay)
     status, results = poll_command_status(rtr_client, max_retries, retry_delay, logger)
     if not status:
         return False, None
 
     # Save response to file (if we got this far, we have a status)
-    save_response_to_file(status, script_name, rtr_result_dir, logger)
+    save_response_to_file(status, script_name, rtr_result_dir, logger, device_id=device_id)
 
     # Upload to BloodHound if enabled and we have results
     if results and upload_to_bh and bh_manager:
@@ -113,10 +104,16 @@ def save_response_to_file(
     status: Dict,
     script_name: str,
     rtr_result_dir: str,
-    logger: logging.Logger
+    logger: logging.Logger,
+    device_id: Optional[str] = None
 ) -> bool:
-    """Save the RTR command response to a JSON file."""
-    out_file = os.path.join(rtr_result_dir, f"{script_name.replace(' ', '_')}_response.json")
+    """Save the RTR command response to a JSON file.
+    
+    Note: rtr_result_dir should already be the device-specific subdirectory if device_id is provided.
+    """
+    script_safe = script_name.replace(' ', '_')
+    # rtr_result_dir should already be device-specific subdirectory, so just use script name
+    out_file = os.path.join(rtr_result_dir, f"{script_safe}_response.json")
     try:
         with open(out_file, "w", encoding="utf-8") as fh:
             json.dump(status, fh, indent=2)
