@@ -159,7 +159,11 @@ class CrowdStrikeRTR:
         if devices_response:
             resources = devices_response.get("resources", [])
             if resources:
-                self.logger.info(f"Found {len(resources)} devices")
+                self.logger.info(f"Found {len(resources)} devices:")
+                self.logger.info("-" * 80)
+                for idx, device_id in enumerate(resources, 1):
+                    self.logger.info(f"  {idx}. {device_id}")
+                self.logger.info("-" * 80)
                 return resources
             else:
                 self.logger.warning("No devices found in response")
@@ -192,18 +196,32 @@ class CrowdStrikeRTR:
         if devices_response:
             resources = devices_response.get("resources", [])
             windows_devices = []
+            windows_details = []
+            
             for device_info in resources:
                 device_id = device_info.get("device_id")
                 platform_name = device_info.get("platform_name", "")
                 hostname = device_info.get("hostname", "Unknown")
+                os_version = device_info.get("os_version", "Unknown")
                 
                 if platform_name and platform_name.lower() == "windows":
                     windows_devices.append(device_id)
+                    windows_details.append({
+                        "device_id": device_id,
+                        "hostname": hostname,
+                        "os_version": os_version
+                    })
                     self.logger.debug(f"Device {device_id} ({hostname}) is Windows")
                 else:
                     self.logger.debug(f"Device {device_id} ({hostname}) is {platform_name}, skipping")
             
-            self.logger.info(f"Found {len(windows_devices)} Windows devices out of {len(device_ids)} total")
+            self.logger.info(f"Found {len(windows_devices)} Windows devices out of {len(device_ids)} total:")
+            self.logger.info("-" * 100)
+            self.logger.info(f"{'#':<4} {'Device ID':<40} {'Hostname':<30} {'OS Version':<20}")
+            self.logger.info("-" * 100)
+            for idx, detail in enumerate(windows_details, 1):
+                self.logger.info(f"{idx:<4} {detail['device_id']:<40} {detail['hostname']:<30} {detail['os_version']:<20}")
+            self.logger.info("-" * 100)
             return windows_devices
         else:
             self.logger.error("Failed to get device details from API")
@@ -250,16 +268,49 @@ class CrowdStrikeRTR:
         if online_state_response:
             resources = online_state_response.get("resources", [])
             online_devices = []
+            offline_devices = []
+            
+            # Create a mapping of device_id to state
+            device_state_map = {}
             for device_info in resources:
                 device_id = device_info.get("id")
                 state = device_info.get("state", "").lower()
+                device_state_map[device_id] = state
                 if state == "online":
                     online_devices.append(device_id)
                     self.logger.debug(f"Device {device_id} is online")
                 else:
+                    offline_devices.append(device_id)
                     self.logger.debug(f"Device {device_id} is {state}")
             
-            self.logger.info(f"Found {len(online_devices)} online devices out of {len(device_ids)} total")
+            # Fetch device details to show hostnames
+            device_details_map = {}
+            if device_ids:
+                headers_detail = self._get_headers()
+                ids_param = ",".join(device_ids)
+                params_detail = {"ids": ids_param}
+                details_response = self._make_api_call(
+                    "GET", self.devices_details_url, headers=headers_detail, params=params_detail
+                )
+                if details_response:
+                    for device_info in details_response.get("resources", []):
+                        device_id = device_info.get("device_id")
+                        hostname = device_info.get("hostname", "Unknown")
+                        device_details_map[device_id] = hostname
+            
+            self.logger.info(f"Found {len(online_devices)} online devices out of {len(device_ids)} total:")
+            self.logger.info("-" * 100)
+            self.logger.info(f"{'#':<4} {'Device ID':<40} {'Hostname':<30} {'Status':<10}")
+            self.logger.info("-" * 100)
+            for idx, device_id in enumerate(online_devices, 1):
+                hostname = device_details_map.get(device_id, "Unknown")
+                self.logger.info(f"{idx:<4} {device_id:<40} {hostname:<30} {'ONLINE':<10}")
+            if offline_devices:
+                for device_id in offline_devices:
+                    hostname = device_details_map.get(device_id, "Unknown")
+                    state = device_state_map.get(device_id, "unknown").upper()
+                    self.logger.info(f"{'':<4} {device_id:<40} {hostname:<30} {state:<10}")
+            self.logger.info("-" * 100)
             return online_devices
         else:
             self.logger.error("Failed to get online state from API")

@@ -29,7 +29,7 @@ def process_script(
     
     # Step 1: run script
     logger.info("Step 1: Running RTR script %s", script_name)
-    if not rtr_client.run_rtr_script(script_name=script_name):
+    if not rtr_client.run_rtr_script(script_name=script_name, device_id=device_id):
         logger.error("Failed to run RTR script %s.", script_name)
         return False, None
 
@@ -38,6 +38,15 @@ def process_script(
     status, results = poll_command_status(rtr_client, max_retries, retry_delay, logger)
     if not status:
         return False, None
+
+    # Verify the response is for the correct device
+    if device_id:
+        resources = status.get("resources", [])
+        if resources:
+            response_aid = resources[0].get("aid")
+            if response_aid and response_aid != device_id:
+                logger.warning("Response device ID mismatch! Expected: %s, Got: %s", device_id, response_aid)
+                logger.warning("This may indicate scripts are being run on the wrong device.")
 
     # Save response to file (if we got this far, we have a status)
     save_response_to_file(status, script_name, rtr_result_dir, logger, device_id=device_id)
